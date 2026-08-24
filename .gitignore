@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.venv/
+final/
+consolidado/
+*.csv
+Base_Unificada_*.parquet
