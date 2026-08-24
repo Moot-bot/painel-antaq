@@ -2,5 +2,5 @@ streamlit>=1.36
 duckdb>=1.0
 plotly>=5.20
 pandas>=2.0
-pyarrow>=15.0
+pyarrow>=15.0,<25
 numpy>=1.26

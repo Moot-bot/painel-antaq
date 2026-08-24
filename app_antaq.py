@@ -36,6 +36,11 @@ import streamlit as st
 
 st.set_page_config(page_title="Painel ANTAQ", page_icon="⚓", layout="wide")
 
+# Aparece na barra lateral. Serve para confirmar, olhando o app no ar, qual
+# versão do arquivo está realmente publicada — deploy que não atualizou é o
+# erro mais confuso de diagnosticar.
+VERSAO = "2026-08-24d"
+
 APP_DIR = Path(__file__).resolve().parent
 
 # O app roda em três contextos com layouts diferentes: local a partir da raiz do
@@ -148,6 +153,32 @@ def lista_sql(vals) -> str:
     return ", ".join("'" + str(v).replace("'", "''") + "'" for v in vals)
 
 
+MAPA_MES: dict[str, int] = {}
+for _i, _nome in enumerate(
+        ["janeiro", "fevereiro", "marco", "abril", "maio", "junho", "julho",
+         "agosto", "setembro", "outubro", "novembro", "dezembro"], start=1):
+    MAPA_MES[_nome] = _i
+    MAPA_MES[_nome[:3]] = _i
+    MAPA_MES[str(_i)] = _i
+    MAPA_MES[f"{_i:02d}"] = _i
+for _i, _nome in enumerate(
+        ["january", "february", "march", "april", "may", "june", "july",
+         "august", "september", "october", "november", "december"], start=1):
+    MAPA_MES.setdefault(_nome, _i)
+    MAPA_MES.setdefault(_nome[:3], _i)
+
+
+def normalizar_mes(s: pd.Series) -> pd.Series:
+    """A coluna `Mes` da ANTAQ aparece ora como número, ora como nome do mês
+    por extenso, com ou sem acento. Devolve 1..12 (Int64) ou nulo."""
+    t = (s.astype("string").str.strip().str.lower()
+          .str.normalize("NFKD").str.encode("ascii", "ignore").str.decode("ascii"))
+    num = pd.to_numeric(t, errors="coerce")
+    mapeado = t.map(MAPA_MES)
+    out = num.where(num.between(1, 12)).fillna(mapeado)
+    return out.astype("Int64")
+
+
 def parse_coord(s: pd.Series) -> pd.DataFrame:
     """A ANTAQ grava 'lat, lon' em graus decimais, mas o separador e a vírgula
     decimal variam entre anos — daí o parser tolerante em vez de um split."""
@@ -173,6 +204,7 @@ def parse_coord(s: pd.Series) -> pd.DataFrame:
 # ============================================================================
 
 st.sidebar.title("⚓ Painel ANTAQ")
+st.sidebar.caption(f"versão {VERSAO}")
 pasta = st.sidebar.text_input("Pasta dos dados", PASTA_PADRAO)
 con, modo, info = conectar(pasta)
 
@@ -319,7 +351,7 @@ with abas[0]:
                           color_discrete_sequence=CORES)
             fig.add_hline(y=100, line_dash="dot", opacity=.4)
         fig.update_layout(height=420, legend_title="", hovermode="x unified")
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
     with c2:
         tot = piv.sum(axis=1)
         n_anos = max(len(tot) - 1, 1)
@@ -334,7 +366,7 @@ with abas[0]:
             "CAGR %": (((piv.iloc[-1] / base0) ** (1 / n_anos) - 1)
                        * 100).round(1),
         }).sort_values("Mt (últ. ano)", ascending=False)
-        st.dataframe(resumo, use_container_width=True)
+        st.dataframe(resumo, width="stretch")
 
     st.caption("Variação ano a ano (Mt)")
     delta = tot.diff().dropna()
@@ -344,7 +376,7 @@ with abas[0]:
                color_discrete_map={"alta": "#4C78A8", "queda": "#C44E52"},
                labels={"x": "", "y": "Δ Mt", "color": ""})
           .update_layout(height=250, showlegend=False),
-        use_container_width=True)
+        width="stretch")
 
 
 # ---- 2. Sazonalidade -------------------------------------------------------
@@ -355,31 +387,40 @@ with abas[1]:
         df = q(pasta, f"""SELECT AnoArquivo ano, Mes mes, SUM(peso)/1e6 mt
                           FROM carga WHERE {W} AND Mes IS NOT NULL
                           GROUP BY 1,2""")
+        df["mes_num"] = normalizar_mes(df.mes)
+        brutos = sorted(df.loc[df.mes_num.isna(), "mes"].astype(str).unique())
+        df = df.dropna(subset=["mes_num"])
+        df["mes_num"] = df.mes_num.astype(int)
+        if brutos:
+            st.caption(f"{len(brutos)} valor(es) de mês não reconhecido(s) e "
+                       f"ignorado(s): {', '.join(brutos[:8])}")
         if df.empty:
-            st.warning("Sem dados mensais no recorte.")
+            st.warning("Não consegui interpretar a coluna `Mes` desta base.")
         else:
-            mat = df.pivot_table(index="ano", columns="mes", values="mt")
-            mat.columns = [MESES[int(c) - 1] for c in mat.columns]
+            df = df.groupby(["ano", "mes_num"], as_index=False).mt.sum()
+            mat = df.pivot_table(index="ano", columns="mes_num", values="mt")
+            mat = mat.reindex(columns=range(1, 13))
+            mat.columns = MESES
             st.plotly_chart(
                 px.imshow(mat, aspect="auto", color_continuous_scale=SEQ,
                           labels=dict(color="Mt", x="", y=""),
                           title="Peso movimentado por ano e mês")
                   .update_layout(height=460),
-                use_container_width=True)
+                width="stretch")
             c1, c2 = st.columns(2)
             with c1:
-                perfil = df.groupby("mes").mt.mean().reindex(range(1, 13))
+                perfil = df.groupby("mes_num").mt.mean().reindex(range(1, 13))
                 perfil.index = MESES
                 st.plotly_chart(
                     px.line(x=perfil.index, y=perfil.values, markers=True,
                             labels={"x": "", "y": "Mt (média dos anos)"},
                             title="Perfil sazonal médio")
                       .update_layout(height=320),
-                    use_container_width=True)
+                    width="stretch")
             with c2:
                 amp = (mat.max(axis=1) / mat.min(axis=1)).round(2)
                 st.caption("Amplitude sazonal (mês mais forte ÷ mais fraco)")
-                st.dataframe(amp.rename("razão"), use_container_width=True)
+                st.dataframe(amp.rename("razão"), width="stretch")
 
 
 # ---- 3. Portos -------------------------------------------------------------
@@ -397,7 +438,7 @@ with abas[2]:
                    labels={"mt": "Mt no período", "porto": ""},
                    color_discrete_sequence=CORES)
               .update_layout(height=max(400, 26 * len(df)), legend_title="UF"),
-            use_container_width=True)
+            width="stretch")
     with c2:
         tot_geral = q(pasta, f"SELECT SUM(peso)/1e6 t FROM carga "
                              f"WHERE {W}").t[0] or 0
@@ -429,7 +470,7 @@ with abas[2]:
             px.line(s, x="ano", y="mt", color="porto", markers=True,
                     labels={"mt": "Mt", "ano": ""},
                     color_discrete_sequence=CORES).update_layout(height=380),
-            use_container_width=True)
+            width="stretch")
 
 
 # ---- 4. Mapa ---------------------------------------------------------------
@@ -461,10 +502,10 @@ with abas[3]:
                             showsubunits=True, subunitcolor="#ddd",
                             lataxis_range=[-35, 7], lonaxis_range=[-75, -32])
             fig.update_layout(height=620, margin=dict(l=0, r=0, t=10, b=0))
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
             st.dataframe(df[["porto", "uf", "mt", "reg"]]
                          .sort_values("mt", ascending=False).round(1),
-                         use_container_width=True, hide_index=True)
+                         width="stretch", hide_index=True)
 
 
 # ---- 5. Origem-Destino -----------------------------------------------------
@@ -497,7 +538,7 @@ with abas[4]:
                               value=df.mt.tolist(),
                               color="rgba(76,120,168,0.35)")))
                 fig.update_layout(height=max(500, 15 * len(nos)), font_size=11)
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width="stretch")
             elif vis == "Matriz":
                 to = df.groupby("Origem").mt.sum().nlargest(15).index
                 td = df.groupby("Destino").mt.sum().nlargest(15).index
@@ -508,7 +549,7 @@ with abas[4]:
                     px.imshow(mat, aspect="auto", color_continuous_scale=SEQ,
                               labels=dict(color="Mt"))
                       .update_layout(height=560),
-                    use_container_width=True)
+                    width="stretch")
             else:
                 df["par"] = df.Origem + " → " + df.Destino
                 st.plotly_chart(
@@ -516,8 +557,8 @@ with abas[4]:
                            orientation="h", labels={"mt": "Mt", "par": ""},
                            color_discrete_sequence=CORES)
                       .update_layout(height=max(400, 22 * len(df))),
-                    use_container_width=True)
-            st.dataframe(df.round(2), use_container_width=True,
+                    width="stretch")
+            st.dataframe(df.round(2), width="stretch",
                          hide_index=True)
 
 
@@ -545,10 +586,10 @@ with abas[5]:
                                color="mt", color_continuous_scale=SEQ)
                       .update_layout(height=520,
                                      margin=dict(t=20, l=0, r=0, b=0)),
-                    use_container_width=True)
+                    width="stretch")
             with c2:
                 st.dataframe(df[["sh4", "natureza", "mt"]].round(1),
-                             use_container_width=True, hide_index=True,
+                             width="stretch", hide_index=True,
                              height=520)
             st.caption("Códigos NCM SH4. A descrição textual não vem nos "
                        "arquivos da ANTAQ — veja ConsultarMercadoria.aspx.")
@@ -563,7 +604,7 @@ with abas[5]:
                         labels={"mt": "Mt", "ano": ""},
                         color_discrete_sequence=CORES)
                   .update_layout(height=380),
-                use_container_width=True)
+                width="stretch")
 
 
 # ---- 7. Desempenho ---------------------------------------------------------
@@ -591,7 +632,7 @@ with abas[6]:
                    color_discrete_sequence=CORES)
               .update_layout(height=420, barmode="stack", legend_title="",
                              hovermode="x unified"),
-            use_container_width=True)
+            width="stretch")
 
         c1, c2 = st.columns(2)
         with c1:
@@ -610,7 +651,7 @@ with abas[6]:
                                          line=dict(color=cor)))
             fig.update_layout(height=360, yaxis_title="Horas",
                               hovermode="x unified")
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
             st.caption("Fila portuária tem cauda longa: a mediana costuma "
                        "contar uma história diferente da média.")
         with c2:
@@ -630,7 +671,7 @@ with abas[6]:
                                        "espera": "T1 espera (h)"},
                                color_discrete_sequence=CORES)
                       .update_layout(height=360),
-                    use_container_width=True)
+                    width="stretch")
 
         if "MotivosParalisacao" in CA:
             st.markdown("**Paralisações** — só há registro a partir de 2015.")
@@ -646,7 +687,7 @@ with abas[6]:
                            labels={"horas": "Horas totais", "motivo": ""},
                            color_discrete_sequence=CORES)
                       .update_layout(height=max(300, 26 * len(mot))),
-                    use_container_width=True)
+                    width="stretch")
 
 
 # ---- 8. SQL ----------------------------------------------------------------
@@ -660,7 +701,7 @@ with abas[7]:
     if st.button("Executar", type="primary"):
         try:
             out = con.execute(sql).fetchdf()
-            st.dataframe(out, use_container_width=True)
+            st.dataframe(out, width="stretch")
             st.download_button("Baixar CSV",
                                out.to_csv(index=False, sep=";", decimal=","),
                                "consulta_antaq.csv", "text/csv")
