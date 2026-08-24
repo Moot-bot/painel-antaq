@@ -47,7 +47,7 @@ engano.
 
 ## Dados
 
-Os `.parquet` desta pasta são agregados (65.0 MB no total), gerados por
+Os `.parquet` desta pasta são agregados (65.7 MB no total), gerados por
 `preparar_publicacao.py` a partir da base unificada completa. Eles alimentam
 todas as visualizações do painel.
 

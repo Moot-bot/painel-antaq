@@ -39,7 +39,7 @@ st.set_page_config(page_title="Painel ANTAQ", page_icon="⚓", layout="wide")
 # Aparece na barra lateral. Serve para confirmar, olhando o app no ar, qual
 # versão do arquivo está realmente publicada — deploy que não atualizou é o
 # erro mais confuso de diagnosticar.
-VERSAO = "2026-08-24e"
+VERSAO = "2026-08-24f"
 
 APP_DIR = Path(__file__).resolve().parent
 
@@ -321,6 +321,40 @@ sem_dupla = st.sidebar.checkbox(
          "gera movimentação na origem e no destino da mesma carga.")
 
 
+def _ativos() -> dict[str, str]:
+    """Filtros que o usuário marcou, e a coluna que cada um exige."""
+    d = {}
+    if f_nat:
+        d["Natureza da carga"] = "Natureza da Carga"
+    if f_uf:
+        d["UF"] = "SGUF"
+    if f_sent:
+        d["Sentido"] = "Sentido"
+    if f_nav:
+        d["Tipo de navegação"] = COL_NAV
+    if so_rio:
+        d["Instalações em rio"] = "Instalacao Portuaria em Rio"
+    if sem_dupla:
+        d["Movimentação apurada"] = "FlagMCOperacaoCarga"
+    return d
+
+
+def ignorados(cols: list[str]) -> list[str]:
+    """Filtros ativos que esta tabela não consegue honrar. Um filtro que some
+    sem aviso é pior que um filtro ausente: o gráfico fica plausível e errado."""
+    return [rot for rot, col in _ativos().items() if col not in cols]
+
+
+def aviso_filtros(cols: list[str]) -> None:
+    faltam = ignorados(cols)
+    if faltam:
+        st.warning(
+            "Filtro(s) **não aplicado(s)** nesta aba por ausência da coluna "
+            f"nesta tabela: {', '.join(faltam)}. Os números abaixo "
+            "desconsideram esse recorte.",
+            icon="⚠️")
+
+
 def where(cols: list[str], col_ano: str = "AnoArquivo") -> str:
     p = [f"{col_ano} BETWEEN {anos[0]} AND {anos[1]}"]
     if f_nat and "Natureza da Carga" in cols:
@@ -565,6 +599,7 @@ with abas[3]:
 # ---- 5. Origem-Destino -----------------------------------------------------
 with abas[4]:
     CO = cols_de(con, "od")
+    aviso_filtros(CO)
     if "Origem" not in CO or "Destino" not in CO:
         st.info("Colunas Origem/Destino ausentes.")
     else:
@@ -619,6 +654,7 @@ with abas[4]:
 # ---- 6. Mercadorias --------------------------------------------------------
 with abas[5]:
     CM = cols_de(con, "mercadoria")
+    aviso_filtros(CM)
     if "CDMercadoria" not in CM:
         st.info("Coluna CDMercadoria ausente.")
     else:
@@ -670,6 +706,9 @@ with abas[6]:
             "`agg_paralisacao.parquet` no modo publicado.")
     else:
         bruta = info["paralisacao"] == "bruta"
+        CP = cols_de(con, "paralisacao")
+        # a tabela de paralisação usa 'uf' minúsculo como equivalente de SGUF
+        aviso_filtros(CP + (["SGUF"] if "uf" in CP else []))
         wp = [f"ano BETWEEN {anos[0]} AND {anos[1]}"]
         if f_uf:
             wp.append(f"uf IN ({lista_sql(f_uf)})")
@@ -827,6 +866,7 @@ with abas[7]:
     if not info.get("tem_atracacoes"):
         st.warning("`Base_Atracacoes.parquet` não encontrada.")
     else:
+        aviso_filtros(CA)
         st.caption("Tudo aqui é calculado no grão de **atracação**. Somar "
                    "tempos na base de carga multiplicaria pelo número de "
                    "cargas por atracação.")
