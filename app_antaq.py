@@ -39,7 +39,7 @@ st.set_page_config(page_title="Painel ANTAQ", page_icon="⚓", layout="wide")
 # Aparece na barra lateral. Serve para confirmar, olhando o app no ar, qual
 # versão do arquivo está realmente publicada — deploy que não atualizou é o
 # erro mais confuso de diagnosticar.
-VERSAO = "2026-08-24d"
+VERSAO = "2026-08-24e"
 
 APP_DIR = Path(__file__).resolve().parent
 
@@ -133,6 +133,39 @@ def conectar(pasta: str):
     else:
         info["tem_atracacoes"] = False
 
+    # ---- paralisações ------------------------------------------------------
+    # A Base_Atracacoes só guarda o AGREGADO por atracação (qtd, horas, 3
+    # motivos concatenados). Para analisar motivo, duração e sazonalidade das
+    # paradas é preciso a tabela BRUTA, uma linha por paralisação. Procura-se
+    # ela em ./consolidado; no modo publicado, usa-se o agregado pré-calculado.
+    info["paralisacao"] = None
+    agg_par = p / "agg_paralisacao.parquet"
+    brutos: list[Path] = []
+    for cand in (p, p.parent / "consolidado", Path("./consolidado"),
+                 Path(__file__).resolve().parent / "consolidado"):
+        try:
+            brutos += sorted(cand.glob("TemposAtracacaoParalisacao_*.parquet"))
+        except OSError:
+            continue
+
+    if brutos and info["tem_atracacoes"]:
+        con.execute(f"""
+            CREATE VIEW paralisacao AS
+            SELECT p.DescricaoTempoDesconto AS motivo,
+                   date_diff('minute', p.DTInicio, p.DTTermino) / 60.0 AS horas,
+                   1 AS paradas,
+                   a."Porto Atracacao" AS porto, a.SGUF AS uf,
+                   a.AnoArquivo_Atracacao AS ano, a.Mes AS mes
+            FROM read_parquet('{brutos[-1].as_posix()}') p
+            LEFT JOIN atracacoes a ON p.IDAtracacao = a.IDAtracacao
+            WHERE p.DTInicio IS NOT NULL AND p.DTTermino IS NOT NULL
+              AND date_diff('minute', p.DTInicio, p.DTTermino) >= 0""")
+        info["paralisacao"] = "bruta"
+    elif agg_par.exists():
+        con.execute(f"CREATE VIEW paralisacao AS SELECT * FROM "
+                    f"read_parquet('{agg_par.as_posix()}')")
+        info["paralisacao"] = "agregada"
+
     return con, modo, info
 
 
@@ -180,8 +213,20 @@ def normalizar_mes(s: pd.Series) -> pd.Series:
 
 
 def parse_coord(s: pd.Series) -> pd.DataFrame:
-    """A ANTAQ grava 'lat, lon' em graus decimais, mas o separador e a vírgula
-    decimal variam entre anos — daí o parser tolerante em vez de um split."""
+    """Extrai lat/lon de 'Coordenadas'.
+
+    A ordem do par não é confiável: o metadado diz "latitude e longitude", mas
+    na prática aparece invertido. Em vez de assumir, o par é orientado pela
+    faixa geográfica — no Brasil a latitude fica em [-34, 6] e a longitude em
+    [-74, -28], que só se sobrepõem numa nesga estreita. Se uma ordem não
+    couber e a outra couber, usa-se a que cabe.
+    """
+    LAT = (-35.0, 7.0)
+    LON = (-75.0, -28.0)
+
+    def cabe(a: float, b: float) -> bool:
+        return LAT[0] <= a <= LAT[1] and LON[0] <= b <= LON[1]
+
     lat, lon = [], []
     for v in s.fillna(""):
         nums = re.findall(r"-?\d+[.,]?\d*", str(v).replace(";", ","))
@@ -192,8 +237,13 @@ def parse_coord(s: pd.Series) -> pd.DataFrame:
                 b = float(nums[1].replace(",", "."))
             except ValueError:
                 a = b = np.nan
-            if not (-90 <= a <= 90) or not (-180 <= b <= 180):
-                a = b = np.nan
+            if not np.isnan(a):
+                if cabe(a, b):
+                    pass                      # já está (lat, lon)
+                elif cabe(b, a):
+                    a, b = b, a               # veio (lon, lat)
+                else:
+                    a = b = np.nan            # fora do Brasil ou ilegível
         lat.append(a)
         lon.append(b)
     return pd.DataFrame({"lat": lat, "lon": lon})
@@ -316,7 +366,8 @@ k3.metric("Registros de carga", f"{int(kpi.reg[0] or 0):,}".replace(",", "."))
 k4.metric("Atracações", f"{int(katr.n[0]):,}".replace(",", "."))
 
 abas = st.tabs(["Visão geral", "Sazonalidade", "Portos", "Mapa",
-                "Origem–Destino", "Mercadorias", "Desempenho", "SQL"])
+                "Origem–Destino", "Mercadorias", "Paralisações",
+                "Desempenho", "SQL"])
 
 
 # ---- 1. Visão geral --------------------------------------------------------
@@ -498,9 +549,12 @@ with abas[3]:
                 hover_data={"mt": ":.1f", "lat": False, "lon": False},
                 color_discrete_sequence=CORES)
             fig.update_geos(scope="south america", resolution=50,
-                            showcountries=True, countrycolor="#bbb",
-                            showsubunits=True, subunitcolor="#ddd",
-                            lataxis_range=[-35, 7], lonaxis_range=[-75, -32])
+                            showland=True, landcolor="#F2F0EA",
+                            showocean=True, oceancolor="#EAF1F7",
+                            showcountries=True, countrycolor="#C8C8C8",
+                            showsubunits=True, subunitcolor="#DEDEDE",
+                            coastlinecolor="#AAAAAA", fitbounds=False,
+                            lataxis_range=[-34, 6], lonaxis_range=[-74, -33])
             fig.update_layout(height=620, margin=dict(l=0, r=0, t=10, b=0))
             st.plotly_chart(fig, width="stretch")
             st.dataframe(df[["porto", "uf", "mt", "reg"]]
@@ -607,8 +661,169 @@ with abas[5]:
                 width="stretch")
 
 
-# ---- 7. Desempenho ---------------------------------------------------------
+# ---- 7. Paralisações -------------------------------------------------------
 with abas[6]:
+    if info.get("paralisacao") is None:
+        st.warning(
+            "Não encontrei a tabela de paralisações. Ela vem de "
+            "`TemposAtracacaoParalisacao_*.parquet` (pasta `consolidado`) ou de "
+            "`agg_paralisacao.parquet` no modo publicado.")
+    else:
+        bruta = info["paralisacao"] == "bruta"
+        wp = [f"ano BETWEEN {anos[0]} AND {anos[1]}"]
+        if f_uf:
+            wp.append(f"uf IN ({lista_sql(f_uf)})")
+        WP = " AND ".join(wp)
+
+        st.caption("A ANTAQ só registra paralisações a partir de **2015** — "
+                   "anos anteriores aparecem zerados por ausência de dado, não "
+                   "por ausência de parada.")
+
+        # --- indicadores ----------------------------------------------------
+        tot = q(pasta, f"""SELECT SUM(horas) horas, SUM(paradas) paradas
+                           FROM paralisacao WHERE {WP}""")
+        base = q(pasta, f"""SELECT COUNT(*) atr,
+                        SUM(CASE WHEN QtdParalisacoes > 0 THEN 1 ELSE 0 END) com,
+                        SUM(TOperacao) op
+                        FROM atracacoes WHERE {WA}""") \
+            if info.get("tem_atracacoes") else None
+
+        m1, m2, m3, m4 = st.columns(4)
+        horas = float(tot.horas[0] or 0)
+        paradas = float(tot.paradas[0] or 0)
+        m1.metric("Horas paralisadas", f"{horas/1e3:,.0f} mil".replace(",", "."))
+        m2.metric("Nº de paralisações", f"{int(paradas):,}".replace(",", "."))
+        if base is not None and base.atr[0]:
+            m3.metric("Atracações afetadas",
+                      f"{base.com[0] / base.atr[0] * 100:,.1f}%"
+                      .replace(",", "."))
+            if base.op[0]:
+                m4.metric("Horas paradas ÷ horas de operação",
+                          f"{horas / float(base.op[0]) * 100:,.1f}%"
+                          .replace(",", "."),
+                          help="Quanto do tempo de operação foi consumido por "
+                               "paradas registradas.")
+
+        # --- evolução -------------------------------------------------------
+        ev = q(pasta, f"""SELECT ano, SUM(horas) horas, SUM(paradas) paradas
+                          FROM paralisacao WHERE {WP}
+                          GROUP BY 1 ORDER BY 1""")
+        fig = go.Figure()
+        fig.add_bar(x=ev.ano, y=ev.horas / 1e3, name="Horas paradas (mil)",
+                    marker_color="#4C78A8")
+        fig.add_trace(go.Scatter(x=ev.ano, y=ev.paradas / 1e3,
+                                 name="Nº de paradas (mil)", yaxis="y2",
+                                 mode="lines+markers",
+                                 line=dict(color="#C44E52")))
+        fig.update_layout(height=380, hovermode="x unified",
+                          yaxis_title="Mil horas",
+                          yaxis2=dict(overlaying="y", side="right",
+                                      title="Mil paradas", showgrid=False),
+                          legend=dict(orientation="h", y=1.12))
+        st.plotly_chart(fig, width="stretch")
+
+        # --- motivos --------------------------------------------------------
+        st.markdown("**Motivos**")
+        n_mot = st.slider("Quantos motivos", 5, 30, 12, key="nmot")
+        mot = q(pasta, f"""SELECT motivo, SUM(horas) horas, SUM(paradas) paradas,
+                                  SUM(horas)/NULLIF(SUM(paradas),0) media
+                           FROM paralisacao WHERE {WP} AND motivo IS NOT NULL
+                           GROUP BY 1 ORDER BY horas DESC LIMIT {n_mot}""")
+        c1, c2 = st.columns([3, 2])
+        with c1:
+            st.plotly_chart(
+                px.bar(mot.sort_values("horas"), x="horas", y="motivo",
+                       orientation="h", text_auto=".2s",
+                       labels={"horas": "Horas totais", "motivo": ""},
+                       color_discrete_sequence=CORES)
+                  .update_layout(height=max(360, 28 * len(mot))),
+                width="stretch")
+        with c2:
+            st.caption("Frequência × duração média")
+            st.plotly_chart(
+                px.scatter(mot, x="paradas", y="media", size="horas",
+                           hover_name="motivo", size_max=45,
+                           labels={"paradas": "Nº de ocorrências",
+                                   "media": "Duração média (h)"},
+                           color_discrete_sequence=CORES)
+                  .update_layout(height=max(360, 28 * len(mot))),
+                width="stretch")
+            st.caption("Canto superior esquerdo: raro mas longo. Inferior "
+                       "direito: frequente mas curto — desgasta pela "
+                       "repetição.")
+
+        # --- motivo x ano ---------------------------------------------------
+        top_mot = mot.motivo.head(10).tolist()
+        if top_mot:
+            mx = q(pasta, f"""SELECT ano, motivo, SUM(horas) horas
+                              FROM paralisacao
+                              WHERE {WP} AND motivo IN ({lista_sql(top_mot)})
+                              GROUP BY 1,2""")
+            piv = mx.pivot_table(index="motivo", columns="ano", values="horas")
+            share = piv.div(piv.sum(axis=0), axis=1).mul(100)
+            st.caption("Participação de cada motivo nas horas paradas do ano (%)")
+            st.plotly_chart(
+                px.imshow(share.round(1), aspect="auto",
+                          color_continuous_scale=SEQ,
+                          labels=dict(color="%", x="", y=""))
+                  .update_layout(height=max(320, 30 * len(share))),
+                width="stretch")
+
+        # --- sazonalidade e portos ------------------------------------------
+        c1, c2 = st.columns(2)
+        with c1:
+            sz = q(pasta, f"""SELECT mes, SUM(horas) horas
+                              FROM paralisacao WHERE {WP} AND mes IS NOT NULL
+                              GROUP BY 1""")
+            sz["mes_num"] = normalizar_mes(sz.mes)
+            sz = sz.dropna(subset=["mes_num"])
+            if not sz.empty:
+                sz = sz.groupby(sz.mes_num.astype(int)).horas.sum() \
+                       .reindex(range(1, 13))
+                sz.index = MESES
+                st.caption("Horas paradas por mês (todos os anos)")
+                st.plotly_chart(
+                    px.bar(x=sz.index, y=sz.values / 1e3,
+                           labels={"x": "", "y": "Mil horas"},
+                           color_discrete_sequence=CORES)
+                      .update_layout(height=330),
+                    width="stretch")
+                st.caption("Chuva costuma dominar o pico — compare com o "
+                           "período úmido da região filtrada.")
+        with c2:
+            pr = q(pasta, f"""SELECT porto, SUM(horas) horas,
+                                     SUM(paradas) paradas
+                              FROM paralisacao WHERE {WP} AND porto IS NOT NULL
+                              GROUP BY 1 ORDER BY horas DESC LIMIT 15""")
+            st.caption("Portos com mais horas paradas")
+            st.plotly_chart(
+                px.bar(pr.sort_values("horas"), x="horas", y="porto",
+                       orientation="h", labels={"horas": "Horas", "porto": ""},
+                       color_discrete_sequence=CORES)
+                  .update_layout(height=330),
+                width="stretch")
+
+        # --- distribuição (só com a tabela bruta) ---------------------------
+        if bruta:
+            st.markdown("**Distribuição da duração das paradas**")
+            d = q(pasta, f"""SELECT
+                     quantile_cont(horas, 0.50) p50,
+                     quantile_cont(horas, 0.75) p75,
+                     quantile_cont(horas, 0.90) p90,
+                     quantile_cont(horas, 0.99) p99,
+                     AVG(horas) media, MAX(horas) maximo
+                     FROM paralisacao WHERE {WP}""")
+            st.dataframe(d.round(2), width="stretch", hide_index=True)
+            st.caption("Se a média for muito maior que a mediana, poucas "
+                       "paradas longas dominam o total — e a política para "
+                       "reduzi-las é diferente da que reduz paradas curtas.")
+        else:
+            st.caption("Modo publicado: a distribuição por parada individual "
+                       "exige a tabela bruta, disponível localmente.")
+
+
+# ---- 8. Desempenho ---------------------------------------------------------
+with abas[7]:
     if not info.get("tem_atracacoes"):
         st.warning("`Base_Atracacoes.parquet` não encontrada.")
     else:
@@ -690,8 +905,8 @@ with abas[6]:
                     width="stretch")
 
 
-# ---- 8. SQL ----------------------------------------------------------------
-with abas[7]:
+# ---- 9. SQL ----------------------------------------------------------------
+with abas[8]:
     st.caption("SQL do DuckDB. Views: `carga`, `od`, `mercadoria`, "
                "`atracacoes`. Medidas: `peso`, `teu`, `registros`.")
     padrao = ("SELECT SGUF, SUM(peso)/1e6 AS mt\n"
