@@ -36,7 +36,42 @@ import streamlit as st
 
 st.set_page_config(page_title="Painel ANTAQ", page_icon="⚓", layout="wide")
 
-PASTA_PADRAO = os.environ.get("ANTAQ_DIR", "./final")
+APP_DIR = Path(__file__).resolve().parent
+
+# O app roda em três contextos com layouts diferentes: local a partir da raiz do
+# projeto (dados em ./final), local dentro da pasta publicável e no Streamlit
+# Cloud (dados ao lado do .py). Em vez de fixar um caminho, procura-se nos
+# candidatos prováveis, na ordem.
+def _tem_dados(p: Path) -> bool:
+    try:
+        return (any(p.glob("Base_Unificada_*.parquet"))
+                or (p / "agg_principal.parquet").exists())
+    except OSError:
+        return False
+
+
+def descobrir_pasta() -> tuple[str, list[Path]]:
+    candidatos = []
+    if os.environ.get("ANTAQ_DIR"):
+        candidatos.append(Path(os.environ["ANTAQ_DIR"]))
+    candidatos += [APP_DIR, Path("."), Path("./final"), APP_DIR / "final",
+                   APP_DIR / "dados", Path("./painel-antaq"), Path("./dados")]
+    vistos, unicos = set(), []
+    for c in candidatos:
+        try:
+            chave = c.resolve()
+        except OSError:
+            continue
+        if chave not in vistos:
+            vistos.add(chave)
+            unicos.append(c)
+    for c in unicos:
+        if _tem_dados(c):
+            return str(c), unicos
+    return str(unicos[0]), unicos
+
+
+PASTA_PADRAO, CANDIDATOS = descobrir_pasta()
 CORES = px.colors.qualitative.Safe
 SEQ = "Blues"
 MESES = ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun",
@@ -142,11 +177,33 @@ pasta = st.sidebar.text_input("Pasta dos dados", PASTA_PADRAO)
 con, modo, info = conectar(pasta)
 
 if modo == "vazio":
-    st.error(
-        f"Nada encontrado em `{pasta}`.\n\n"
-        "Esperado `Base_Unificada_*.parquet` (modo completo) ou "
-        "`agg_principal.parquet` (modo publicado). Rode o `merge_antaq.py` ou "
-        "o `preparar_publicacao.py` antes.")
+    st.error(f"Nenhum dado encontrado em `{pasta}`.")
+    with st.expander("Onde eu procurei", expanded=True):
+        linhas = []
+        for c in CANDIDATOS:
+            try:
+                existe = c.is_dir()
+                alvo = c.resolve()
+            except OSError:
+                existe, alvo = False, c
+            linhas.append(f"- `{alvo}` — "
+                          + ("pasta não existe" if not existe
+                             else "sem os arquivos esperados"))
+        st.markdown("\n".join(linhas))
+        try:
+            aqui = sorted(p.name for p in Path(pasta).iterdir())[:25]
+            st.caption(f"Conteúdo de `{pasta}`: "
+                       + (", ".join(aqui) if aqui else "(vazio)"))
+        except OSError:
+            pass
+    st.markdown(
+        "Preciso de **`Base_Unificada_*.parquet`** (modo completo) ou "
+        "**`agg_principal.parquet`** (modo publicado).\n\n"
+        "- Base completa: rode `merge_antaq.py -e ./consolidado -s ./final`\n"
+        "- Pacote publicável: rode `preparar_publicacao.py -e ./final "
+        "-s ./painel-antaq`\n\n"
+        "Se os arquivos estiverem em outro lugar, informe o caminho no campo "
+        "da barra lateral.")
     st.stop()
 
 CC = cols_de(con, "carga")

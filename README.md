@@ -12,7 +12,9 @@ streamlit run app_antaq.py
 
 ## Publicar de graça no Streamlit Community Cloud
 
-1. Crie um repositório no GitHub e suba esta pasta:
+1. Crie um repositório **público** vazio no GitHub (sem README, sem .gitignore).
+
+2. Nesta pasta:
 
    ```bash
    git init
@@ -23,11 +25,25 @@ streamlit run app_antaq.py
    git push -u origin main
    ```
 
-2. Entre em <https://share.streamlit.io> com a conta do GitHub.
-3. **New app** → escolha o repositório, branch `main`, arquivo `app_antaq.py`.
-4. **Deploy**. O primeiro build leva alguns minutos.
+3. Acesse <https://share.streamlit.io> e entre com a conta do GitHub,
+   autorizando o acesso aos repositórios.
 
-A URL final fica no formato `https://SEU_USUARIO-painel-antaq.streamlit.app`.
+4. Clique em **Create app** (canto superior direito) → **Yup, I have an app**.
+   Preencha:
+   - Repository: `SEU_USUARIO/painel-antaq`
+   - Branch: `main`
+   - Main file path: `app_antaq.py`
+   - App URL: o subdomínio que quiser
+
+5. **Deploy**. O primeiro build leva alguns minutos (instala as dependências).
+
+Limites do plano gratuito: ~1 GB de memória, apps públicos ilimitados (apenas
+1 privado), e o app hiberna após 12 h sem acesso — acorda sozinho na próxima
+visita, levando alguns segundos.
+
+O `.gitignore` desta pasta já bloqueia `final/`, `consolidado/` e
+`Base_Unificada_*.parquet`, para o commit não levar a base de 220 MB por
+engano.
 
 ## Dados
 
